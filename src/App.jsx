@@ -345,13 +345,13 @@ export default function App() {
     try {
       if (editing === 'new') {
         const sorteo = {
-          id: uid(),
-          title: formTitle.trim(),
-          description: formDesc.trim(),
-          active: formActive,
-          createdAt: new Date().toISOString(),
-          codes: newCodesList,
-        };
+        id: uid(),
+        title: formTitle.trim(),
+        description: formDesc.trim(),
+        active: formActive,
+        created_at: new Date().toISOString(),  // ✅ Corregido: created_at
+        codes: newCodesList,
+      };
         await saveSorteo(sorteo);
         setSorteos([sorteo, ...sorteos]);
       } else {
