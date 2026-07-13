@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Ticket, Lock, Plus, Trash2, Copy, Check, LogOut, Eye, EyeOff, X, Loader2, Gift, ExternalLink, Shield, Award, Flame, Youtube, Heart, Twitch } from 'lucide-react';
+import { supabase } from './lib/supabase';
 
-// Credenciales
+// Credenciales del admin (puedes cambiarlas)
 const ADMIN_USER = 'byrol';
 const ADMIN_PASS = 'byrol2026';
 
@@ -44,29 +45,125 @@ export default function App() {
   const [loadingTwitch, setLoadingTwitch] = useState(true);
   const [fogEnabled, setFogEnabled] = useState(true);
 
+  // ============================================
+  // FUNCIONES PARA SORTEOS
+  // ============================================
+
+  async function loadSorteos() {
+    try {
+      const { data, error } = await supabase
+        .from('sorteos')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Error cargando sorteos:', error);
+      return [];
+    }
+  }
+
+  async function saveSorteo(sorteo) {
+    try {
+      const { data, error } = await supabase
+        .from('sorteos')
+        .upsert(sorteo, { onConflict: 'id' })
+        .select();
+      
+      if (error) throw error;
+      return data?.[0];
+    } catch (error) {
+      console.error('Error guardando sorteo:', error);
+      throw error;
+    }
+  }
+
+  async function deleteSorteo(id) {
+    try {
+      const { error } = await supabase
+        .from('sorteos')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+      return true;
+    } catch (error) {
+      console.error('Error eliminando sorteo:', error);
+      throw error;
+    }
+  }
+
+  // ============================================
+  // FUNCIONES PARA CÓDIGOS
+  // ============================================
+
+  async function claimCode(sorteoId, code) {
+    try {
+      const { data: existingClaim, error: claimError } = await supabase
+        .from('claims')
+        .select('*')
+        .eq('sorteo_id', sorteoId)
+        .eq('code', code)
+        .maybeSingle();
+      
+      if (claimError) throw claimError;
+      if (existingClaim) {
+        throw new Error('Código ya canjeado');
+      }
+      
+      const { data: newClaim, error: insertError } = await supabase
+        .from('claims')
+        .insert({
+          id: `claim_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          sorteo_id: sorteoId,
+          code: code
+        })
+        .select()
+        .single();
+      
+      if (insertError) throw insertError;
+      return newClaim;
+    } catch (error) {
+      console.error('Error canjeando código:', error);
+      throw error;
+    }
+  }
+
+  async function getClaims(sorteoId) {
+    try {
+      const { data, error } = await supabase
+        .from('claims')
+        .select('*')
+        .eq('sorteo_id', sorteoId);
+      
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Error obteniendo canjes:', error);
+      return [];
+    }
+  }
+
+  // ============================================
+  // LOAD DATA
+  // ============================================
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      // Cargar sorteos
-      let list = [];
-      try {
-        const res = await window.storage.get(STORAGE_KEY, true);
-        list = res ? JSON.parse(res.value) : [];
-      } catch {
-        list = [];
+      const lista = await loadSorteos();
+      setSorteos(lista);
+      
+      const allClaims = {};
+      for (const sorteo of lista) {
+        const claimsList = await getClaims(sorteo.id);
+        if (claimsList.length > 0) {
+          allClaims[sorteo.id] = claimsList[0].code;
+        }
       }
-      setSorteos(list);
-
-      // Cargar claims
-      let c = {};
-      try {
-        const res2 = await window.storage.get(CLAIMS_KEY, false);
-        c = res2 ? JSON.parse(res2.value) : {};
-      } catch {
-        c = {};
-      }
-      setClaims(c);
+      setClaims(allClaims);
 
       // Cargar estado de Twitch
       try {
@@ -90,7 +187,7 @@ export default function App() {
         setFogEnabled(true);
       }
     } catch (e) {
-      setError('No se pudieron cargar los datos. Intenta recargar.');
+      setError('No se pudieron cargar los sorteos.');
     } finally {
       setLoading(false);
       setLoadingTwitch(false);
@@ -100,6 +197,10 @@ export default function App() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // ============================================
+  // MOUSE TRACKING
+  // ============================================
 
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -122,12 +223,18 @@ export default function App() {
     };
   }, []);
 
+  // ============================================
+  // PERSISTENCIA
+  // ============================================
+
   async function persistSorteos(next) {
     setSorteos(next);
     try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify(next), true);
+      for (const sorteo of next) {
+        await saveSorteo(sorteo);
+      }
     } catch (e) {
-      setError('No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.');
+      setError('No se pudo guardar.');
     }
   }
 
@@ -140,7 +247,6 @@ export default function App() {
     }
   }
 
-  // Función para guardar el estado de Twitch
   async function persistTwitchStatus(live) {
     setIsTwitchLive(live);
     try {
@@ -150,7 +256,6 @@ export default function App() {
     }
   }
 
-  // Función para guardar el estado de la neblina
   async function persistFogStatus(enabled) {
     setFogEnabled(enabled);
     try {
@@ -160,36 +265,40 @@ export default function App() {
     }
   }
 
+  // ============================================
+  // HANDLERS
+  // ============================================
+
   async function handleClaim(sorteo) {
     if (claimingId) return;
     if (claims[sorteo.id]) return;
     setClaimingId(sorteo.id);
     try {
-      const res = await window.storage.get(STORAGE_KEY, true).catch(() => null);
-      const latest = res ? JSON.parse(res.value) : sorteos;
-      const idx = latest.findIndex((s) => s.id === sorteo.id);
-      if (idx === -1) {
-        setError('Este sorteo ya no existe.');
+      const codes = sorteo.codes || [];
+      const claimedCodes = claims[sorteo.id] ? [claims[sorteo.id]] : [];
+      
+      let availableCode = null;
+      for (const code of codes) {
+        if (!claimedCodes.includes(code)) {
+          availableCode = code;
+          break;
+        }
+      }
+      
+      if (!availableCode) {
+        setError('No hay códigos disponibles.');
         setClaimingId(null);
         return;
       }
-      const target = { ...latest[idx], codes: [...latest[idx].codes] };
-      const availableIdx = target.codes.findIndex((c) => !c.claimed);
-      if (availableIdx === -1) {
-        setSorteos(latest);
-        setClaimingId(null);
-        return;
-      }
-      target.codes[availableIdx] = { ...target.codes[availableIdx], claimed: true, claimedAt: Date.now() };
-      const claimedCode = target.codes[availableIdx].code;
-      const nextList = [...latest];
-      nextList[idx] = target;
-      await persistSorteos(nextList);
-      const nextClaims = { ...claims, [sorteo.id]: claimedCode };
-      await persistClaims(nextClaims);
-      setRevealed((prev) => ({ ...prev, [sorteo.id]: claimedCode }));
+      
+      await claimCode(sorteo.id, availableCode);
+      
+      const nextClaims = { ...claims, [sorteo.id]: availableCode };
+      setClaims(nextClaims);
+      setRevealed((prev) => ({ ...prev, [sorteo.id]: availableCode }));
+      
     } catch (e) {
-      setError('No se pudo canjear el código. Inténtalo de nuevo.');
+      setError(e.message || 'No se pudo canjear el código.');
     } finally {
       setClaimingId(null);
     }
@@ -240,10 +349,11 @@ export default function App() {
           title: formTitle.trim(),
           description: formDesc.trim(),
           active: formActive,
-          createdAt: Date.now(),
-          codes: newCodesList.map((code) => ({ code, claimed: false })),
+          createdAt: new Date().toISOString(),
+          codes: newCodesList,
         };
-        await persistSorteos([sorteo, ...sorteos]);
+        await saveSorteo(sorteo);
+        setSorteos([sorteo, ...sorteos]);
       } else {
         const next = sorteos.map((s) => {
           if (s.id !== editing) return s;
@@ -262,8 +372,13 @@ export default function App() {
   }
 
   async function handleDelete(id) {
-    const next = sorteos.filter((s) => s.id !== id);
-    await persistSorteos(next);
+    try {
+      await deleteSorteo(id);
+      const next = sorteos.filter((s) => s.id !== id);
+      setSorteos(next);
+    } catch (e) {
+      setError('No se pudo eliminar el sorteo.');
+    }
   }
 
   async function toggleActive(s) {
@@ -273,7 +388,10 @@ export default function App() {
 
   const publicSorteos = sorteos.filter((s) => s.active);
 
-  // Patrocinadores
+  // ============================================
+  // PATROCINADORES
+  // ============================================
+
   const sponsors = [
     {
       id: 'keydrop',
@@ -350,7 +468,10 @@ export default function App() {
     </div>
   );
 
-  // Footer
+  // ============================================
+  // FOOTER
+  // ============================================
+
   const Footer = () => (
     <footer className="footer">
       <div className="footer-content">
@@ -390,6 +511,10 @@ export default function App() {
       </div>
     </footer>
   );
+
+  // ============================================
+  // RENDER
+  // ============================================
 
   return (
     <div className="app-container">
@@ -442,7 +567,6 @@ export default function App() {
           background: var(--bg);
         }
 
-        /* ====== FONDO ====== */
         .background-with-light {
           position: fixed;
           inset: 0;
@@ -455,7 +579,7 @@ export default function App() {
         .cs-background {
           position: absolute;
           inset: 0;
-          background-image: url('/logos/fondo5.webp');
+          background-image: url('/logos/fondocs2.jpg');
           background-size: cover;
           background-position: center;
           opacity: 0.2;
@@ -468,14 +592,13 @@ export default function App() {
           inset: 0;
           background: 
             linear-gradient(135deg, rgba(12, 12, 37, 0.7), rgba(26, 10, 46, 0.7)),
-            url('/logos/fondo5.webp');
+            url('/logos/fondocs2.jpg');
           background-size: cover;
           background-position: center;
           opacity: 0.4;
           z-index: 2;
         }
 
-        /* Neblina estilo CS2 - con colores mejorados */
         .cs-fog {
           position: absolute;
           inset: 0;
@@ -504,7 +627,6 @@ export default function App() {
           100% { transform: scale(0.9) translate(-20px, 10px); opacity: 0.7; }
         }
 
-        /* Orbes decorativos */
         .bg-orb {
           position: absolute;
           border-radius: 50%;
@@ -553,7 +675,6 @@ export default function App() {
           75% { transform: translate(30px, -30px) scale(1.05); }
         }
 
-        /* Aura del mouse */
         .mouse-light {
           position: absolute;
           inset: 0;
@@ -596,7 +717,6 @@ export default function App() {
           flex-direction: column;
         }
 
-        /* ====== HEADER ====== */
         header {
           border-bottom: 1px solid rgba(255, 215, 0, 0.08);
           background: rgba(10, 10, 15, 0.6);
@@ -665,7 +785,6 @@ export default function App() {
           display: none;
         }
 
-        /* ====== BOTÓN DE TWITCH ====== */
         .twitch-button {
           display: flex;
           align-items: center;
@@ -745,7 +864,6 @@ export default function App() {
           50% { transform: scale(1.4); opacity: 0.7; }
         }
 
-        /* ====== NAV ====== */
         .nav-tab { 
           font-family: var(--font-display);
           font-weight: 600;
@@ -785,7 +903,6 @@ export default function App() {
           color: var(--text);
         }
 
-        /* ====== TARJETAS ====== */
         .ticket-card { 
           background: var(--surface);
           backdrop-filter: blur(12px);
@@ -828,7 +945,6 @@ export default function App() {
           border: 1px solid rgba(255, 215, 0, 0.05);
         }
 
-        /* ====== BADGES ====== */
         .admin-panel-title {
           font-family: var(--font-display);
           background: linear-gradient(135deg, #FFD700, #FFA500);
@@ -857,7 +973,6 @@ export default function App() {
           border-color: rgba(51, 183, 160, 0.2);
         }
 
-        /* ====== BOTONES ====== */
         .btn-primary { 
           background: linear-gradient(135deg, #FFD700, #FFA500);
           color: #0a0a0f;
@@ -892,7 +1007,6 @@ export default function App() {
         
         .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        /* ====== INPUTS ====== */
         .input-field { 
           background: rgba(10, 10, 15, 0.8);
           border: 1px solid rgba(255, 215, 0, 0.1);
@@ -908,7 +1022,6 @@ export default function App() {
           box-shadow: 0 0 0 3px rgba(255, 215, 0, 0.1);
         }
 
-        /* ====== CONTROLES ADMIN ====== */
         .twitch-admin-control {
           display: flex;
           align-items: center;
@@ -981,7 +1094,6 @@ export default function App() {
           font-weight: 600;
         }
 
-        /* ====== PATROCINADORES ====== */
         .sponsor-button {
           display: flex;
           align-items: center;
@@ -1063,7 +1175,6 @@ export default function App() {
           font-weight: 600;
         }
 
-        /* ====== BARRAS DE PROGRESO ====== */
         .stock-bar-track { 
           background: rgba(255, 215, 0, 0.05);
           border-radius: 999px; 
@@ -1082,7 +1193,6 @@ export default function App() {
           background: linear-gradient(90deg, #FF6B5B, #FF4444);
         }
 
-        /* ====== FOOTER ====== */
         .footer {
           margin-top: auto;
           padding: 24px 0 12px 0;
@@ -1219,7 +1329,6 @@ export default function App() {
           animation-play-state: paused;
         }
 
-        /* ====== ANIMACIONES ====== */
         .fade-in {
           animation: fadeIn 0.5s ease forwards;
         }
@@ -1242,7 +1351,6 @@ export default function App() {
           text-shadow: 0 0 40px rgba(255, 215, 0, 0.1);
         }
 
-        /* ====== RESPONSIVE ====== */
         @media (max-width: 640px) {
           .content-wrapper {
             padding: 0 12px;
@@ -1321,7 +1429,6 @@ export default function App() {
         }
       `}</style>
 
-      {/* ====== FONDO ====== */}
       <div className="background-with-light">
         <div className="cs-background"></div>
         <div className="cs-background-overlay"></div>
@@ -1335,7 +1442,6 @@ export default function App() {
       </div>
 
       <div className="content-wrapper">
-        {/* ====== HEADER ====== */}
         <header className="flex items-center justify-between">
           <div className="header-left">
             <span className="logo-text">BYROL</span>
@@ -1353,7 +1459,6 @@ export default function App() {
               <Lock size={11} /> Admin
             </button>
             
-            {/* Botón de Twitch */}
             <a
               href="https://www.twitch.tv/xbyrolx"
               target="_blank"
@@ -1377,7 +1482,6 @@ export default function App() {
         )}
 
         <div className="flex-1">
-          {/* ====== VISTA PÚBLICA ====== */}
           {view === 'public' && (
             <div className="px-4 py-8 fade-in">
               <div className="flex items-center gap-3 mb-2">
@@ -1406,8 +1510,8 @@ export default function App() {
                   ) : (
                     <div className="grid gap-5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
                       {publicSorteos.map((s, index) => {
-                        const total = s.codes.length;
-                        const remaining = s.codes.filter((c) => !c.claimed).length;
+                        const total = s.codes?.length || 0;
+                        const remaining = s.codes?.filter((c) => !c.claimed)?.length || 0;
                         const pct = total ? (remaining / total) * 100 : 0;
                         const claimedCode = claims[s.id] || revealed[s.id];
                         const soldOut = remaining === 0 && !claimedCode;
@@ -1453,7 +1557,6 @@ export default function App() {
             </div>
           )}
 
-          {/* ====== LOGIN ====== */}
           {view === 'login' && (
             <div className="px-4 py-16 max-w-sm mx-auto fade-in">
               <div className="text-center mb-8">
@@ -1477,7 +1580,6 @@ export default function App() {
             </div>
           )}
 
-          {/* ====== ADMIN ====== */}
           {view === 'admin' && (
             <div className="px-4 py-8 fade-in">
               <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -1495,7 +1597,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Control de Twitch */}
               <div className="ticket-card p-4 mb-4">
                 <div className="flex items-center justify-between flex-wrap gap-3">
                   <div className="flex items-center gap-3">
@@ -1520,7 +1621,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Control de neblina */}
               <div className="ticket-card p-4 mb-4">
                 <div className="flex items-center justify-between flex-wrap gap-3">
                   <div className="flex items-center gap-3">
@@ -1576,8 +1676,9 @@ export default function App() {
               ) : (
                 <div className="flex flex-col gap-3">
                   {sorteos.map((s) => {
-                    const total = s.codes.length;
-                    const remaining = s.codes.filter((c) => !c.claimed).length;
+                    const total = s.codes?.length || 0;
+                    const claimed = s.codes?.filter((c) => c.claimed)?.length || 0;
+                    const remaining = total - claimed;
                     return (
                       <div key={s.id} className="ticket-card p-4 flex items-center justify-between gap-4 flex-wrap">
                         <div>
@@ -1609,7 +1710,6 @@ export default function App() {
           )}
         </div>
 
-        {/* ====== FOOTER ====== */}
         <Footer />
       </div>
     </div>
